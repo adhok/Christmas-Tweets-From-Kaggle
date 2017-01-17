@@ -1,0 +1,357 @@
+---
+title: "Exploring Christmas Tweets"
+author: "Pradeep Adhokshaja"
+date: "2 January 2017"
+output: 
+  html_document: 
+    fig_height: 7
+    fig_width: 10
+    theme: journal
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+
+```{r eval=F,message=F}
+library(plyr)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(highcharter)
+library(tm.plugin.webmining)
+library(plotly)
+library(tidytext)
+library(gridExtra)
+library(igraph)
+library(widyr)
+hols<-read.csv("HolidayTweets.csv",stringsAsFactors = F,header = T,quote = "")
+
+text <- unlist(lapply(hols$Metadata,extractHTMLStrip))
+text <- gsub("\n","",text)
+data_tweets <- data.frame(text=text)
+data_tweets$hashtags <- str_extract_all(data_tweets$text, "#\\S+")
+data_tweets$num_hashtags <- unlist(lapply((data_tweets$hashtags),length))
+data_tweets$clean_text <- gsub("[^[:alnum:] ]", "", data_tweets$text)
+data_tweets$number_of_words <- sapply(gregexpr("\\W+", data_tweets$clean_text), length) + 1
+
+data_tweets$picture <- ifelse(str_detect(data_tweets$text, "t.co"),"Picture/link", "No picture/link")
+
+data_tweets$X <- seq(from=1,to=dim(data_tweets)[1],by=1)
+
+
+```
+
+The data set given consists of ID information and the HTML metadata. Here we use the extractHTMLStrip() function provided by the **tm.plugin.webmining**
+library.Upon extraction, we use several text processing tools to extract other information such as hashtags, number of words and whether pictures/links were used.
+
+## Hashtags
+
+
+
+### What were the most commonly used Hashtags?
+
+```{r message=F,eval=FALSE}
+
+
+hash <- unlist(data_tweets$hashtags)
+hash <- data.frame(i=1:length(hash),text=hash)
+hash$text <- tolower(hash$text)
+hash %>% group_by(text) %>% summarise(n=n()) %>% arrange(desc(n)) %>% filter(n>150) %>%
+  hchart("column",x=text,y=log(n)) %>%
+  hc_xAxis(labels = list(rotation = -90, step = 1))
+
+
+
+```
+
+
+![](https://raw.githubusercontent.com/adhok/Christmas-Tweets-From-Kaggle/master/hashtags_christmas.png)
+
+
+Naturally, we would expect the most popular hashtag to be Christmas related(naturally). We also see #iphone, #selfie, #giftcard,#blackfriday and #shoes amongst other things.Christmas shopping hit an all time high in 2016, with overall spending in the US crossing a trillion dollars. We also see mentions of other festivals during the season , such as #hanukkah.
+
+### Distribution of Number of Hashtags used
+
+```{r eval=F,message=FALSE}
+
+ggplot(data=data_tweets,aes(x=num_hashtags))+geom_histogram(binwidth = 1)
+
+
+```
+
+![](https://raw.githubusercontent.com/adhok/Christmas-Tweets-From-Kaggle/master/number_of_hashtags.png)
+
+## Number of Words Used
+
+### Distribution of Number of Words Used
+
+```{r eval=F,message=FALSE}
+ggplot(data_tweets, aes(x=number_of_words)) + geom_histogram(binwidth = 1) + ggtitle("Number of Words Used")
+
+```
+
+![](https://raw.githubusercontent.com/adhok/Christmas-Tweets-From-Kaggle/master/number_of_words.png)
+
+### Distribution of Number of Words used with and without hashtags
+
+```{r eval=F,message=FALSE}
+data_tweets %>% mutate(if_hashtag=ifelse(num_hashtags>0,"Yes","No")) %>%
+  ggplot(aes(x=number_of_words, fill=if_hashtag)) +geom_histogram(position="identity", alpha=0.4,binwidth =0.5)
+
+
+```
+
+
+![](https://raw.githubusercontent.com/adhok/Christmas-Tweets-From-Kaggle/master/num_of_words_with_out_hash.png)
+
+We see that both distributions are skewed which leads us to use the median statistic to encapsulate the number of words for both of these distributions.
+
+### Medians
+
+```{r eval=F,message=FALSE}
+
+DT::datatable(data_tweets %>% mutate(if_hashtag=ifelse(num_hashtags>0,"Yes","No"))%>%group_by(if_hashtag) %>% summarise(n=median(number_of_words)) )
+
+```
+
+We estimate that tweets with hashtags have at least 5 times more words used than tweets without hashtags.
+
+
+## Number of Tweets with(out) pictures and links
+
+### Bar Chart Visualization
+
+```{r eval=F,message=FALSE}
+
+data_tweets %>% group_by(picture)%>% summarise(n=n()) %>%
+  hchart("column",x=picture,y=log(n))
+
+
+```
+
+![](https://raw.githubusercontent.com/adhok/Christmas-Tweets-From-Kaggle/master/picture_no_picture.png)
+
+We see that most of the tweets did not contain pictures/links. The plots look comparable because of log scaling.
+
+### Do tweets with links/pictures have more/less word usage?
+
+```{r eval=F,message=FALSE}
+DT::datatable(data_tweets%>%group_by(picture) %>% summarise(n=median(number_of_words)) )
+
+
+
+
+```
+
+Tweets with picture/links tend to use more words based on the median estimate
+
+### Hashtags and Links
+
+```{r eval=F,message=FALSE}
+# Do a group-wise transform(), splitting on "Date"
+data_tweets <- data_tweets %>% mutate(if_hashtag = ifelse(num_hashtags>0,"Yes","No"))
+temp <- data_tweets %>% group_by(picture,if_hashtag) %>% summarise(n=n())
+ce <- ddply(temp, "picture", transform,
+percent_n = n / sum(n) * 100)
+ggplot(ce, aes(x=picture, y=percent_n, fill=if_hashtag)) +
+geom_bar(stat="identity")
+
+
+```
+
+![](https://raw.githubusercontent.com/adhok/Christmas-Tweets-From-Kaggle/master/hashtags_links.png)
+
+A large portion of tweets that have pictures/links use hashtags.
+
+## Sentiments
+
+```{r eval=F,message=FALSE}
+library(tidyr)
+library(RSentiment)
+tweet <- data_tweets$clean_text
+tweet = gsub("(f|ht)(tp)(s?)(://)(.*)[.|/](.*)", " ", tweet)
+#retweet
+tweet = gsub("(RT|via)((?:\\b\\W*@\\w+)+)", " ", tweet)
+# removing hashtags
+tweet = gsub("#\\w+", " ", tweet)
+# removing @people
+tweet = gsub("@\\w+", " ", tweet)
+#removing punctuations
+tweet = gsub("[[:punct:]]", " ", tweet)
+#removing numbers
+tweet = gsub("[[:digit:]]", " ", tweet)
+#removing emojis
+tweet<-str_replace_all(tweet,"[^[:graph:]]"," ")
+tweet <- str_replace_all(tweet,'https'," ")
+tweet <- str_replace_all(tweet,'amp'," ")
+wordstoremove <- c("")
+tweet <- sapply(tweet, function(x) gsub(paste(wordstoremove, collapse = '|'), '', x))
+# removing non-english characters
+#tweet1 <- grep('tweet',iconv(tweet,'latin1','ASCII',sub='tweet'))
+data_tweets$clean_text_2 <- tweet
+
+
+
+data_tweets$sentiment <- rep("",dim(data_tweets)[1])
+
+
+extract_sentiment <- function(text){
+  return(as.character(calculate_sentiment(text)$sentiment))
+}
+
+for(i in 1:dim(data_tweets)[1])
+{
+  data_tweets$sentiment[i] <- as.character(calculate_sentiment(data_tweets$clean_text_2[i])$sentiment)
+}
+
+
+pi <- data_tweets %>% group_by(sentiment) %>% summarise(n=n()) %>% mutate(Percentage=(n/sum(n))*100) 
+plot_ly() %>%
+  add_pie( data= pi,
+          labels=pi$sentiment,
+          values = pi$Percentage,
+          name = "") %>% layout(title = 'Percentage Sentiment in Tweets',
+         xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+         yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+
+```
+
+
+![](https://raw.githubusercontent.com/adhok/Christmas-Tweets-From-Kaggle/master/percentage_sentiment.png)
+
+
+We see that most of the tweets were neutral  in nature, followed by positive and negative ones.
+
+
+### Why are there negative tweets?
+
+To answer this question, we look into what words make up negative tweets.
+
+```{r eval=F,message=FALSE}
+
+words_neg <- subset(data_tweets,sentiment=="Negative"|sentiment=="Very Negative")
+temp <- words_neg[,c("clean_text_2","sentiment","X")]
+
+words <- temp %>%
+  unnest_tokens(word,clean_text_2)%>%
+  filter(!word %in% stop_words$word,
+         str_detect(word,"^[a-z']+$"))
+
+for(i in 1:dim(words)[1])
+{
+  words$sentiment[i] <- as.character(calculate_sentiment(words$word[i])$sentiment)
+}
+
+words %>% filter(sentiment=="Negative"| sentiment=="Very Negative") %>% group_by(word) %>% summarise(n=n()) %>% arrange(desc(n)) %>% filter(n>10) %>%
+  hchart("column",x=word,y=n)%>%
+  hc_xAxis(labels = list(rotation = -90, step = 1))
+
+
+
+
+```
+
+
+![](https://raw.githubusercontent.com/adhok/Christmas-Tweets-From-Kaggle/master/negative_tweets.png)
+
+Words like "emergency","shame","pig","evil","bs","terrible" come under this category.
+
+### Sentiments of Tweets that have/do not have pictures/links
+
+```{r eval=F,message=FALSE}
+ax <- list(
+  zeroline=FALSE,
+  showline=FALSE,
+  showticklabels=FALSE,
+  showgrid=FALSE
+)
+temp <- data_tweets %>% group_by(picture,sentiment) %>% summarise(n=n())
+temp_pic <- subset(temp,picture=="Picture/link")
+temp_no_pic <- subset(temp,picture=="No picture/link")
+temp_pic <- temp_pic %>% mutate(percentage=(n/sum(n))*100)
+temp_no_pic <- temp_no_pic %>% mutate(percentage=(n/sum(n))*100)
+pie_chart_1 <- plot_ly() %>%
+  add_pie(data = temp_pic,
+          labels=temp_pic$sentiment,
+          values = temp_pic$percentage,
+          name = "By Sentiment",
+          domain = list(x = c(0.52, 1), y = c(0.5, 1)))%>%
+  add_pie(data = temp_no_pic,
+          labels=temp_no_pic$sentiment,
+          values = temp_no_pic$percentage,
+          name = "By Sentiment",
+          domain = list(x = c(0, 0.48), y = c(0.5, 1))) %>%
+  layout(title = "Picture and No Picture",
+         xaxis=ax,
+         yaxis=ax)
+  
+  
+
+pie_chart_1
+#pie_chart_2
+
+```
+
+
+![](https://raw.githubusercontent.com/adhok/Christmas-Tweets-From-Kaggle/master/pic_noPic_sentiment.png)
+
+## Most Common Words Used
+
+```{r eval=F,message=FALSE}
+
+library(DT)
+temp <- data_tweets[,c("clean_text_2","sentiment","X")]
+
+
+
+words <- temp %>%
+  unnest_tokens(word,clean_text_2)%>%
+  filter(!word %in% stop_words$word,
+         str_detect(word,"^[a-z']+$"))
+
+words %>% group_by(word) %>% summarise(n=n()) %>% filter(n>250) %>% arrange(desc(n)) %>%
+  hchart("column",x=word,y=log(n))%>%
+  hc_xAxis(labels = list(rotation = -90, step = 1))
+
+#DT::datatable(words %>% group_by(word) %>% summarise(n=n()) %>% filter(n>100) %>% arrange(desc(n)))
+```
+
+
+![](https://raw.githubusercontent.com/adhok/Christmas-Tweets-From-Kaggle/master/common_words.png)
+
+
+## Correlated Terms
+
+```{r eval=F,message=FALSE}
+
+words_counts <- words %>%
+  count(word) %>%
+  filter(n >= 30)
+
+words_correlations <- words %>%
+  semi_join(words_counts) %>%
+  pairwise_cor(word,X,sort = TRUE, upper = FALSE)
+words_correlations <- filter(words_correlations,correlation>0.7)
+words_correlations <- as.data.frame(words_correlations)
+graph <- make_graph(t(words_correlations[,c(1:2)]),directed = F)
+E(graph)$weight <- words_correlations$correlation
+V(graph)$label.cex <- 1.0
+
+plot(graph,edge.width=E(graph)$weight,layout=layout.fruchterman.reingold,vertex.size = 5)
+library(networkD3)
+graph <- as.data.frame(get.edgelist(graph))
+#g <- unique(g)
+simpleNetwork(graph,charge = -200 , opacity = 0.6, zoom = T, fontSize = 15)
+
+#DT::datatable(words_correlations)
+
+```
+
+![](https://raw.githubusercontent.com/adhok/Christmas-Tweets-From-Kaggle/master/corr_terms.png)
+
